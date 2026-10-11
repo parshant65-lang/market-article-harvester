@@ -1,0 +1,30 @@
+name: Harvest Financial Intelligence Articles
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: continuous-harvester-session
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Harvester Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Continuous Article Harvester
+        env:
+          VAULT_PAT: ${{ secrets.VAULT_PAT }}
+        run: |
+          python extractor.py
