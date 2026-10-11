@@ -146,6 +146,18 @@ def extract_article(target):
     except Exception:
         return None, url, "skipped"
 
+def get_registry_parts(vault_data_dir):
+    files = []
+    if os.path.exists(vault_data_dir):
+        for fname in os.listdir(vault_data_dir):
+            m = re.match(r"^link_registry_part(\d+)\.json$", fname)
+            if m:
+                files.append((int(m.group(1)), fname, os.path.join(vault_data_dir, fname)))
+    if not files:
+        fallback_path = os.path.join(vault_data_dir, "link_registry_part1.json")
+        return [(1, "link_registry_part1.json", fallback_path)]
+    return sorted(files, key=lambda x: x[0])
+
 def sync_batch_to_vault():
     buffer_file = os.path.join(BUFFER_DIR, "buffered_items.json")
     registry_updates_file = os.path.join(BUFFER_DIR, "registry_updates.json")
@@ -182,21 +194,67 @@ def sync_batch_to_vault():
         print("[30-MIN SYNC ERROR] Failed to connect to vault repository.")
         return
 
-    # 1. Update Master Link Registry
-    link_reg_path = os.path.join(VAULT_DIR, "data", "link_registry.json")
-    link_reg = {"total_discovered": 0, "total_ingested": 0, "links": {}}
-    if os.path.exists(link_reg_path):
+    # 1. Update Link Registry Volumes
+    data_dir = os.path.join(VAULT_DIR, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    parts = get_registry_parts(data_dir)
+
+    total_ingested_all = 0
+    updated_urls = set()
+
+    for part_num, fname, fpath in parts:
+        if not os.path.exists(fpath):
+            continue
         try:
-            with open(link_reg_path, "r", encoding="utf-8") as f:
-                link_reg = json.load(f)
+            with open(fpath, "r", encoding="utf-8") as f:
+                p_data = json.load(f)
+        except Exception:
+            continue
+
+        p_links = p_data.get("links", {})
+        part_modified = False
+
+        for url, info in registry_updates.items():
+            if url in p_links:
+                p_links[url].update(info)
+                updated_urls.add(url)
+                part_modified = True
+
+        if part_modified:
+            p_data["total_discovered"] = len(p_links)
+            p_data["total_ingested"] = sum(1 for v in p_links.values() if v.get("status") == "ingested")
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(p_data, f, indent=2, ensure_ascii=False)
+
+        total_ingested_all += p_data.get("total_ingested", 0)
+
+    # Edge case: Any URL not found in scanned parts goes to latest active part
+    unmatched_urls = {u: info for u, info in registry_updates.items() if u not in updated_urls}
+    if unmatched_urls:
+        latest_num, latest_name, latest_path = parts[-1]
+        latest_data = {"part": latest_num, "total_discovered": 0, "total_ingested": 0, "links": {}}
+        if os.path.exists(latest_path):
+            try:
+                with open(latest_path, "r", encoding="utf-8") as f:
+                    latest_data = json.load(f)
+            except Exception:
+                pass
+        for u, info in unmatched_urls.items():
+            latest_data.setdefault("links", {})[u] = info
+        latest_data["total_discovered"] = len(latest_data.get("links", {}))
+        latest_data["total_ingested"] = sum(1 for v in latest_data.get("links", {}).values() if v.get("status") == "ingested")
+        with open(latest_path, "w", encoding="utf-8") as f:
+            json.dump(latest_data, f, indent=2, ensure_ascii=False)
+        total_ingested_all += len(unmatched_urls)
+
+    # Clean up legacy link_registry.json if present
+    legacy_file = os.path.join(data_dir, "link_registry.json")
+    if os.path.exists(legacy_file):
+        try:
+            os.remove(legacy_file)
+            subprocess.run(["git", "rm", "-f", "data/link_registry.json"], cwd=VAULT_DIR, capture_output=True)
         except Exception:
             pass
-
-    for url, info in registry_updates.items():
-        if url in link_reg["links"]:
-            link_reg["links"][url].update(info)
-        else:
-            link_reg["links"][url] = info
 
     # 2. Partition into Category Date Files
     file_groups = {}
@@ -243,18 +301,12 @@ def sync_batch_to_vault():
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(records, f, indent=2, ensure_ascii=False)
 
-    link_reg["total_discovered"] = len(link_reg["links"])
-    link_reg["total_ingested"] = sum(1 for v in link_reg["links"].values() if v.get("status") == "ingested")
-
-    with open(link_reg_path, "w", encoding="utf-8") as f:
-        json.dump(link_reg, f, indent=2, ensure_ascii=False)
-
     # 3. Pull rebase & Push to Vault
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], cwd=VAULT_DIR, check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=VAULT_DIR, check=True)
     subprocess.run(["git", "add", "data/"], cwd=VAULT_DIR, check=True)
     commit_res = subprocess.run(
-        ["git", "commit", "-m", f"Extractor 30-Min sync: {len(buffered_items)} articles + Link Registry ({link_reg['total_ingested']} ingested) [skip ci]"],
+        ["git", "commit", "-m", f"Extractor 30-Min sync: {len(buffered_items)} articles + Link Registry ({total_ingested_all} ingested) [skip ci]"],
         cwd=VAULT_DIR, capture_output=True, text=True
     )
     if commit_res.returncode == 0:
@@ -302,30 +354,35 @@ def main():
     while (time.time() - start_time) < SESSION_MAX_SECONDS:
         current_time = time.time()
 
-        # Connect and check pending links from registry
+        # Connect and check pending links from registry volumes
         if os.path.exists(VAULT_DIR):
             shutil.rmtree(VAULT_DIR)
         subprocess.run(["git", "clone", "--depth", "1", VAULT_REPO_URL, VAULT_DIR], capture_output=True, text=True)
 
-        link_reg_path = os.path.join(VAULT_DIR, "data", "link_registry.json")
-        registry = {"links": {}}
-        if os.path.exists(link_reg_path):
-            try:
-                with open(link_reg_path, "r", encoding="utf-8") as f:
-                    registry = json.load(f)
-            except Exception:
-                pass
+        data_dir = os.path.join(VAULT_DIR, "data")
+        parts = get_registry_parts(data_dir)
 
         # Balanced Multi-Source Round-Robin batch selection (100 URLs across all categories)
+        # Scan volumes in ascending order (part1 -> part2 -> part3) to drain older parts first
         by_cat = {}
-        for url, meta in registry.get("links", {}).items():
-            if meta.get("status") == "discovered":
-                c = meta.get("category", "cnbc_markets")
-                by_cat.setdefault(c, []).append({
-                    "url": url,
-                    "source": meta.get("source", "Unknown"),
-                    "category": c
-                })
+        for part_num, fname, fpath in parts:
+            if os.path.exists(fpath):
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        part_data = json.load(f)
+                    for url, meta in part_data.get("links", {}).items():
+                        if meta.get("status") == "discovered":
+                            c = meta.get("category", "cnbc_markets")
+                            by_cat.setdefault(c, []).append({
+                                "url": url,
+                                "source": meta.get("source", "Unknown"),
+                                "category": c
+                            })
+                except Exception:
+                    pass
+            # Early break once sufficient candidates are collected to build balanced batches
+            if sum(len(v) for v in by_cat.values()) >= 500:
+                break
 
         pending_items = []
         categories = list(by_cat.keys())
