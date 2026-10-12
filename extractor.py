@@ -116,12 +116,23 @@ def extract_article(target):
                 pub_utc = parse_pubdate(time_tag.group(1))
 
         # 3. Clean Paragraphs
-        raw_paras = re.findall(r"<p[^>]*>(.*?)</p>", html)
+        raw_paras = re.findall(r"<p[^>]*>(.*?)</p>", html, re.DOTALL)
         clean_paras = []
         for p in raw_paras:
             txt = clean_html(p)
             if len(txt) > 70 and not any(bp in txt.lower() for bp in BLACKLIST_PHRASES):
                 clean_paras.append(txt)
+
+        # Fallback for pages wrapping paragraphs in article tags or caas containers
+        if len(clean_paras) < 3:
+            art_match = re.search(r"<(?:article|div class=[\"']caas-body[\"'])[^>]*>(.*?)</(?:article|div)>", html, re.DOTALL)
+            if art_match:
+                div_paras = re.findall(r"<(?:p|div)[^>]*>(.*?)</(?:p|div)>", art_match.group(1), re.DOTALL)
+                for dp in div_paras:
+                    txt = clean_html(dp)
+                    if len(txt) > 70 and not any(bp in txt.lower() for bp in BLACKLIST_PHRASES):
+                        if txt not in clean_paras:
+                            clean_paras.append(txt)
 
         if len(clean_paras) >= 3:
             unique_seed = f"{url}::{title}"
