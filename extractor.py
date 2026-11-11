@@ -116,7 +116,14 @@ def extract_article(target):
                 pub_utc = parse_pubdate(time_tag.group(1))
 
         # 3. Clean Paragraphs
-        raw_paras = re.findall(r"<p[^>]*>(.*?)</p>", html, re.DOTALL)
+        if "financialexpress.com" in url:
+            fe_paras = re.findall(r'<p class=["\x27]wp-block-paragraph["\x27][^>]*>(.*?)</p>', html, re.DOTALL)
+            if fe_paras:
+                raw_paras = fe_paras
+            else:
+                raw_paras = re.findall(r"<p[^>]*>(.*?)</p>", html, re.DOTALL)
+        else:
+            raw_paras = re.findall(r"<p[^>]*>(.*?)</p>", html, re.DOTALL)
         clean_paras = []
         for p in raw_paras:
             txt = clean_html(p)
