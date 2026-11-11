@@ -18,7 +18,7 @@ if not VAULT_PAT:
     print("[ERROR] VAULT_PAT environment variable is required.")
     sys.exit(1)
 
-VAULT_REPO_URL = f"https://x-access-token:{VAULT_PAT}@github.com/parshant65-lang/market-intelligence-vault.git"
+VAULT_REPO_URL = f"https://x-access-token:{VAULT_PAT}@github.com/parshant65-lang/market-intelligence-vault-2.git"
 VAULT_DIR = "vault_storage"
 BUFFER_DIR = "local_batch_buffer"
 
